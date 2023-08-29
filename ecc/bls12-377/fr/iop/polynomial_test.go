@@ -144,7 +144,7 @@ func TestRoundTrip(t *testing.T) {
 	assert.Equal(p.Basis, reconstructed.Basis)
 	assert.Equal(p.Layout, reconstructed.Layout)
 	assert.Equal(p.shift, reconstructed.shift)
-	assert.Equal(p.size, reconstructed.size)
+	assert.Equal(p.dimension, reconstructed.dimension)
 	assert.Equal(p.blindedSize, reconstructed.blindedSize)
 	c1, c2 := p.Coefficients(), reconstructed.Coefficients()
 	assert.True(reflect.DeepEqual(c1, c2))
@@ -172,7 +172,7 @@ func TestBlinding(t *testing.T) {
 	if wt.blindedSize != size+blindingOrder+1 {
 		t.Fatal("Size field of blinded polynomial is incorrect")
 	}
-	if wt.size != size {
+	if wt.dimension != size {
 		t.Fatal("the size should not have been modified")
 	}
 	x := make([]fr.Element, size)
