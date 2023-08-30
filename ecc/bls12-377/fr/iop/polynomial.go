@@ -63,8 +63,8 @@ var (
 
 // Polynomial wraps a polynomial so that it is
 // interpreted as P'(X)=P(\omega^{s}X).
-// Dimension is the dimension of the smallest subspace to which the
-// polynomial belongs, that is degree(p)+1.
+// Dimension number of coefficients (including heading zeros is provided) of
+// the polynomial
 // For instance if len(P)=32 but P.Size=8, it means that P has been
 // extended (e.g. it is evaluated on a larger set) but P is a polynomial
 // of degree 7.
@@ -72,9 +72,8 @@ var (
 // default blindedSize=Size, until the polynomial is blinded.
 type Polynomial struct {
 	*polynomial
-	shift       int
-	dimension   int
-	blindedSize int
+	shift     int
+	dimension int
 }
 
 // NewPolynomial returned a Polynomial from the provided coefficients in the given form.
@@ -83,9 +82,8 @@ type Polynomial struct {
 // shouldn't be mutated.
 func NewPolynomial(coeffs *[]fr.Element, form Form) *Polynomial {
 	return &Polynomial{
-		polynomial:  newPolynomial(coeffs, form),
-		dimension:   len(*coeffs),
-		blindedSize: len(*coeffs),
+		polynomial: newPolynomial(coeffs, form),
+		dimension:  len(*coeffs),
 	}
 }
 
@@ -96,12 +94,6 @@ func (p *Polynomial) Shift(shift int) *Polynomial {
 	return p
 }
 
-// BlindedSize returns the the size of the polynomial when it is blinded. By
-// default blindedSize=Size, until the polynomial is blinded.
-func (p *Polynomial) BlindedSize() int {
-	return p.blindedSize
-}
-
 // Size returns the dimension of the smallest subspace to which
 // p belongs, that is deg(p)+1
 func (p *Polynomial) Dimension() int {
@@ -109,9 +101,8 @@ func (p *Polynomial) Dimension() int {
 }
 
 // Blind blinds a polynomial q by adding Q(X)*(X^{n}-1),
-// where deg Q = blindingOrder and Q is random, and n is the
-// size of q. Sets the result to p and returns it, as well as the
-// blinding factor Q(X).
+// where deg Q = blindingOrder and Q is random. Sets the result
+// to p and returns it, as well as the blinding factor Q(X).
 //
 // blindingOrder is the degree of Q, where the blinding is Q(X)*(X^{n}-1)
 // where n is the size of p. The size of p is modified since the underlying
@@ -144,7 +135,7 @@ func (p *Polynomial) Blind(blindingOrder int) (*Polynomial, *Polynomial) {
 		(*p.coefficients)[i].Sub(&(*p.coefficients)[i], &r)
 		(*p.coefficients)[i+p.dimension].Add(&(*p.coefficients)[i+p.dimension], &r)
 	}
-	p.blindedSize = newSize
+	p.dimension = newSize
 	b := NewPolynomial(&q, Form{Basis: Canonical, Layout: Regular})
 
 	return p, b
@@ -392,7 +383,6 @@ func (p *Polynomial) WriteTo(w io.Writer) (int64, error) {
 		uint32(p.Layout),
 		uint32(p.shift),
 		uint32(p.dimension),
-		uint32(p.blindedSize),
 	}
 	for _, v := range data {
 		err = binary.Write(w, binary.BigEndian, v)
@@ -420,7 +410,7 @@ func (p *Polynomial) ReadFrom(r io.Reader) (int64, error) {
 	}
 
 	// decode Form.Basis, Form.Layout, shift, size & blindedSize as uint32
-	var data [5]uint32
+	var data [4]uint32
 	var buf [4]byte
 	for i := range data {
 		read, err := io.ReadFull(r, buf[:4])
@@ -435,7 +425,6 @@ func (p *Polynomial) ReadFrom(r io.Reader) (int64, error) {
 	p.Layout = Layout(data[1])
 	p.shift = int(data[2])
 	p.dimension = int(data[3])
-	p.blindedSize = int(data[4])
 
 	return n, nil
 }
