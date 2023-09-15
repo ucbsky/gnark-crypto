@@ -18,11 +18,13 @@ package bls12377
 
 /*
 #cgo LDFLAGS: ./lib/libyyrid.a -ldl
-#include "./lib/yrrid.h"
+#include "./lib/yyrid.h"
 */
 import "C"
 
 import (
+	"fmt"
+	"unsafe"
 	"errors"
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark-crypto/ecc/bls12-377/fr"
@@ -31,15 +33,40 @@ import (
 	"runtime"
 )
 
+
+type Element [6]uint64
+
+type G1Affine_wrapper struct {
+	X, Y Element
+}
+
+type G1Jac_wrapper struct {
+	X, Y, Z Element
+}
+
 // MultiExp implements section 4 of https://eprint.iacr.org/2012/549.pdf
 //
 // This call return an error if len(scalars) != len(points) or if provided config is invalid.
 func (p *G1Affine) MultiExp(points []G1Affine, scalars []fr.Element, config ecc.MultiExpConfig) (*G1Affine, error) {
-	var _p G1Jac
-	if _, err := _p.MultiExp(points, scalars, config); err != nil {
-		return nil, err
-	}
-	p.FromJacobian(&_p)
+	fmt.Print("start\n")
+	//var _p G1Jac
+	//if _, err := _p.MultiExp(points, scalars, config); err != nil {
+	//	return nil, err
+	//}
+	//p.FromJacobian(&_p)
+	ctx := C.multi_scalar_init_wrapper(
+		unsafe.Pointer(&points[0]),
+		C.ulong(len(points)),
+	)
+
+	C.multi_scalar_mult_wrapper(
+		unsafe.Pointer(p),
+		ctx,
+		unsafe.Pointer(&points[0]),
+		unsafe.Pointer(&scalars[0]),
+		C.ulong(len(points)),
+	)
+	fmt.Print("Hello\n")
 	return p, nil
 }
 
