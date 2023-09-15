@@ -16,6 +16,12 @@
 
 package bls12377
 
+/*
+#cgo LDFLAGS: ./lib/libyyrid.a -ldl
+#include "./lib/yrrid.h"
+*/
+import "C"
+
 import (
 	"errors"
 	"github.com/consensys/gnark-crypto/ecc"
