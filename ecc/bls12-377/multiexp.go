@@ -17,7 +17,7 @@
 package bls12377
 
 /*
-#cgo LDFLAGS: ./lib/libyyrid.a -ldl
+#cgo LDFLAGS: -L./lib -lblst_msm
 #include "./lib/yyrid.h"
 */
 import "C"
@@ -34,16 +34,36 @@ import (
 )
 
 
-type Element [6]uint64
+func call_multi_scalar_init(points []G1Affine) unsafe.Pointer {
+	type RustG1Affine struct {
+		X, Y     [6]uint64
+		infinity bool
+	}
 
-type G1Affine_wrapper struct {
-	X, Y Element
+	rust_points := make([]RustG1Affine, len(points))
+	for i := 0; i < len(points); i++ {
+		rust_points[i] = RustG1Affine{
+			points[i].X,
+			points[i].Y,
+			points[i].IsInfinity(),
+		}
+	}
+
+	ctx := C.multi_scalar_init_wrapper(
+		unsafe.Pointer(&rust_points[0]),
+		C.ulong(len(rust_points)),
+	)
+	return ctx
 }
 
-type G1Jac_wrapper struct {
-	X, Y, Z Element
+func (p *G1Jac) call_multi_scalar_mult(ctx unsafe.Pointer, scalars []frElement) {
+	C.multi_scalar_mult_wrapper(
+		unsafe.Pointer(p),
+		ctx,
+		unsafe.Pointer(&scalars[0]),
+		C.ulong(len(scalars)),
+	)
 }
-
 // MultiExp implements section 4 of https://eprint.iacr.org/2012/549.pdf
 //
 // This call return an error if len(scalars) != len(points) or if provided config is invalid.
@@ -54,18 +74,10 @@ func (p *G1Affine) MultiExp(points []G1Affine, scalars []fr.Element, config ecc.
 	//	return nil, err
 	//}
 	//p.FromJacobian(&_p)
-	ctx := C.multi_scalar_init_wrapper(
-		unsafe.Pointer(&points[0]),
-		C.ulong(len(points)),
-	)
+	p := G1Jac{};
+	ctx := call_multi_scalar_init(points)
 
-	C.multi_scalar_mult_wrapper(
-		unsafe.Pointer(p),
-		ctx,
-		unsafe.Pointer(&points[0]),
-		unsafe.Pointer(&scalars[0]),
-		C.ulong(len(points)),
-	)
+	p.call_multi_scalar_mult(ctx, scalars);
 	fmt.Print("Hello\n")
 	return p, nil
 }
