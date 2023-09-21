@@ -68,17 +68,15 @@ func (p *G1Jac) call_multi_scalar_mult(ctx unsafe.Pointer, scalars []frElement) 
 //
 // This call return an error if len(scalars) != len(points) or if provided config is invalid.
 func (p *G1Affine) MultiExp(points []G1Affine, scalars []fr.Element, config ecc.MultiExpConfig) (*G1Affine, error) {
-	fmt.Print("start\n")
 	//var _p G1Jac
 	//if _, err := _p.MultiExp(points, scalars, config); err != nil {
 	//	return nil, err
 	//}
 	//p.FromJacobian(&_p)
-	p := G1Jac{};
+	var _p G1Jac;
 	ctx := call_multi_scalar_init(points)
 
 	p.call_multi_scalar_mult(ctx, scalars);
-	fmt.Print("Hello\n")
 	return p, nil
 }
 
