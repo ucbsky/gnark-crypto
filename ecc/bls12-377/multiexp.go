@@ -29,7 +29,6 @@ import (
 	"errors"
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark-crypto/ecc/bls12-377/fr"
-	"github.com/consensys/gnark-crypto/ecc/bls12-377/fp"
 	"github.com/consensys/gnark-crypto/internal/parallel"
 	"math"
 	"runtime"
@@ -68,7 +67,7 @@ func call_multi_scalar_init(points []G1Affine) unsafe.Pointer {
 	return ctx
 }
 
-func (p *G1Jac) call_multi_scalar_mult(ctx unsafe.Pointer, scalars []fr.Element) {
+func (p *G1Jac) call_multi_scalar_mult(ctx unsafe.Pointer, scalars [][4]uint64) {
 	C.multi_scalar_mult_wrapper(
 		unsafe.Pointer(p),
 		ctx,
@@ -88,27 +87,16 @@ func (p *G1Affine) MultiExp(points []G1Affine, scalars []fr.Element, config ecc.
 
 	glob_mutex.Lock()
 
-	newpoints := make([]G1Affine, 1 << 26)
-	newscalars := make([]fr.Element, 1 << 26)
+	newpoints := make([]G1Affine, 1 << 26) // TODO: round up to multiple
+	newscalars := make([][4]uint64, 1 << 26)
 
 	for i := 0; i < len(points); i++ {
 		newpoints[i] = points[i]
 	}
 	for i := 0; i < len(scalars); i++ {
-		newscalars[i] = scalars[i]
-	}
-	for i := 0; i < len(newpoints); i++ {
-		e := G1Affine {
-			fp.Element{5251478348396171476, 16540721867791304240, 7775435550555796515, 13267976804053043568, 11055743095423796248, 109885503642180069},
-			fp.Element{13877989278141578700, 213321195952251191, 12776427292672923511, 14589237251031923445, 11484448684791621298, 91546401362376762},
+		if i < 20 { // TODO: remove this condition without yyrid crashing
+			newscalars[i] = scalars[i].Bits()
 		}
-		e = G1Affine{}
-		newpoints[i] = e;
-	}
-	for i := 0; i < len(newscalars); i++ {
-		e := fr.Element{12931991065666263145, 16087170993854507466, 10186133635163382546, 10700754374571018}
-		e.SetZero();
-		newscalars[i] = e;
 	}
 
 	fmt.Println("starting multiexp", len(newpoints))
@@ -116,9 +104,23 @@ func (p *G1Affine) MultiExp(points []G1Affine, scalars []fr.Element, config ecc.
 	pp := G1Jac{}
 	ctx := call_multi_scalar_init(newpoints)
 	pp.call_multi_scalar_mult(ctx, newscalars)
-	fmt.Println(pp)
-
 	p.FromJacobian(&pp)
+
+	fmt.Println(*p)
+
+	/* {
+		comparisonscalars := make([]fr.Element, 1 << 26)
+		for i := 0; i < len(scalars); i++ {
+			if i < 20 {
+				comparisonscalars[i] = scalars[i];
+			}
+		}
+		comppj := G1Jac{}
+		comppa := G1Affine{}
+		comppj.MultiExp(newpoints, comparisonscalars, config)
+		comppa.FromJacobian(&comppj)
+		fmt.Println("Gnark built in MSM gives", comppa)
+	} */
 
 	glob_mutex.Unlock()
 	return p, nil
