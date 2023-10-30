@@ -1,4 +1,4 @@
-// Copyright 2020 ConsenSys Software Inc.
+// Copyright 2020 Consensys Software Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@ package ecdsa
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
+	"math/big"
 	"testing"
 
 	"github.com/leanovate/gopter"
@@ -62,6 +64,105 @@ func TestECDSA(t *testing.T) {
 
 	properties.TestingRun(t, gopter.ConsoleReporter(false))
 }
+func TestRecoverPublicKey(t *testing.T) {
+	t.Parallel()
+	parameters := gopter.DefaultTestParameters()
+	properties := gopter.NewProperties(parameters)
+	properties.Property("[BN254] test public key recover", prop.ForAll(
+		func() bool {
+			sk, err := GenerateKey(rand.Reader)
+			if err != nil {
+				return false
+			}
+			pk := sk.PublicKey
+			msg := []byte("test")
+			v, r, s, err := sk.SignForRecover(msg, nil)
+			if err != nil {
+				return false
+			}
+			var recovered PublicKey
+			if err = recovered.RecoverFrom(msg, v, r, s); err != nil {
+				return false
+			}
+			return pk.Equal(&recovered)
+		},
+	))
+	properties.TestingRun(t, gopter.ConsoleReporter(false))
+}
+
+func TestNonMalleability(t *testing.T) {
+
+	// buffer too big
+	t.Run("buffer_overflow", func(t *testing.T) {
+		bsig := make([]byte, 2*sizeFr+1)
+		var sig Signature
+		_, err := sig.SetBytes(bsig)
+		if err != errWrongSize {
+			t.Fatal("should raise wrong size error")
+		}
+	})
+
+	// R overflows p_mod
+	t.Run("R_overflow", func(t *testing.T) {
+		bsig := make([]byte, 2*sizeFr)
+		r := big.NewInt(1)
+		frMod := fr.Modulus()
+		r.Add(r, frMod)
+		buf := r.Bytes()
+		copy(bsig, buf[:])
+
+		var sig Signature
+		_, err := sig.SetBytes(bsig)
+		if err != errRBiggerThanRMod {
+			t.Fatal("should raise error r >= r_mod")
+		}
+	})
+
+	// S overflows p_mod
+	t.Run("S_overflow", func(t *testing.T) {
+		bsig := make([]byte, 2*sizeFr)
+		r := big.NewInt(1)
+		frMod := fr.Modulus()
+		r.Add(r, frMod)
+		buf := r.Bytes()
+		copy(bsig[sizeFr:], buf[:])
+		big.NewInt(1).FillBytes(bsig[:sizeFr])
+
+		var sig Signature
+		_, err := sig.SetBytes(bsig)
+		if err != errSBiggerThanRMod {
+			t.Fatal("should raise error s >= r_mod")
+		}
+	})
+
+}
+
+func TestNoZeros(t *testing.T) {
+	t.Run("R=0", func(t *testing.T) {
+		// R is 0
+		var sig Signature
+		big.NewInt(0).FillBytes(sig.R[:])
+		big.NewInt(1).FillBytes(sig.S[:])
+		bts := sig.Bytes()
+		var newSig Signature
+		_, err := newSig.SetBytes(bts)
+		if err != errZero {
+			t.Fatal("expected error for zero R")
+		}
+	})
+	t.Run("S=0", func(t *testing.T) {
+		// S is 0
+		var sig Signature
+		big.NewInt(1).FillBytes(sig.R[:])
+		big.NewInt(0).FillBytes(sig.S[:])
+		bts := sig.Bytes()
+		var newSig Signature
+		_, err := newSig.SetBytes(bts)
+		if err != errZero {
+			t.Fatal("expected error for zero S")
+		}
+	})
+}
 
 // ------------------------------------------------------------
 // benches
@@ -86,5 +187,22 @@ func BenchmarkVerifyECDSA(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		privKey.PublicKey.Verify(sig, msg, nil)
+	}
+}
+func BenchmarkRecoverPublicKey(b *testing.B) {
+	sk, err := GenerateKey(rand.Reader)
+	if err != nil {
+		b.Fatal(err)
+	}
+	msg := []byte("bench")
+	v, r, s, err := sk.SignForRecover(msg, sha256.New())
+	if err != nil {
+		b.Fatal(err)
+	}
+	for i := 0; i < b.N; i++ {
+		var recovered PublicKey
+		if err = recovered.RecoverFrom(msg, v, r, s); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

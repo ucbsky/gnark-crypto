@@ -3,12 +3,14 @@
 // bw6-756: A Brezing--Weng curve (2-chain with bls12-378)
 //
 //	embedding degree k=6
-//	seed x₀=11045256207009841153.
+//	seed x₀=11045256207009841153
 //	𝔽p: p=366325390957376286590726555727219947825377821289246188278797409783441745356050456327989347160777465284190855125642086860525706497928518803244008749360363712553766506755227344593404398783886857865261088226271336335268413437902849
 //	𝔽r: r=605248206075306171733248481581800960739847691770924913753520744034740935903401304776283802348837311170974282940417
 //	(E/𝔽p): Y²=X³+1
 //	(Eₜ/𝔽p): Y² = X³+33 (M-type twist)
 //	r ∣ #E(Fp) and r ∣ #Eₜ(𝔽p)
+//
+// case t % r % x₀ = 3
 //
 // Extension fields tower:
 //
@@ -38,7 +40,8 @@ import (
 // ID BW6_756 ID
 const ID = ecc.BW6_756
 
-// bCurveCoeff b coeff of the curve Y²=X³+b
+// aCurveCoeff is the a coefficients of the curve Y²=X³+ax+b
+var aCurveCoeff fp.Element
 var bCurveCoeff fp.Element
 
 // bTwistCurveCoeff b coeff of the twist (defined over 𝔽p) curve
@@ -76,7 +79,7 @@ var glvBasis ecc.Lattice
 var xGen big.Int
 
 func init() {
-
+	aCurveCoeff.SetUint64(0)
 	bCurveCoeff.SetOne()
 	bTwistCurveCoeff.MulByNonResidue(&bCurveCoeff)
 
@@ -123,4 +126,9 @@ func Generators() (g1Jac G1Jac, g2Jac G2Jac, g1Aff G1Affine, g2Aff G2Affine) {
 	g1Jac = g1Gen
 	g2Jac = g2Gen
 	return
+}
+
+// CurveCoefficients returns the a, b coefficients of the curve equation.
+func CurveCoefficients() (a, b fp.Element) {
+	return aCurveCoeff, bCurveCoeff
 }

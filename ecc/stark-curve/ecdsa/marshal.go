@@ -1,4 +1,4 @@
-// Copyright 2020 ConsenSys Software Inc.
+// Copyright 2020 Consensys Software Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,8 +18,18 @@ package ecdsa
 
 import (
 	"crypto/subtle"
+	"errors"
+	"github.com/consensys/gnark-crypto/ecc/stark-curve/fr"
 	"io"
+	"math/big"
+
+	"github.com/consensys/gnark-crypto/ecc/stark-curve"
 )
+
+var errWrongSize = errors.New("wrong size buffer")
+var errRBiggerThanRMod = errors.New("r >= r_mod")
+var errSBiggerThanRMod = errors.New("s >= r_mod")
+var errZero = errors.New("zero value")
 
 // Bytes returns the binary representation of the public key
 // follows https://tools.ietf.org/html/rfc8032#section-3.1
@@ -50,6 +60,34 @@ func (pk *PublicKey) SetBytes(buf []byte) (int, error) {
 	}
 	n += sizeFp
 	return n, nil
+}
+
+// RecoverFrom recovers the public key from the message msg, recovery
+// information v and decompose signature {r,s}. If recovery succeeded, the
+// methods sets the current public key to the recovered value. Otherwise returns
+// error and leaves current public key unchanged.
+func (pk *PublicKey) RecoverFrom(msg []byte, v uint, r, s *big.Int) error {
+	if s.Cmp(fr.Modulus()) >= 0 {
+		return errors.New("s is larger than modulus")
+	}
+	if s.Cmp(big.NewInt(0)) <= 0 {
+		return errors.New("s is negative")
+	}
+	P, err := RecoverP(v, r)
+	if err != nil {
+		return err
+	}
+	z := HashToInt(msg)
+	rinv := new(big.Int).ModInverse(r, fr.Modulus())
+	u1 := new(big.Int).Mul(z, rinv)
+	u1.Neg(u1)
+	u1.Mod(u1, fr.Modulus())
+	u2 := new(big.Int).Mul(s, rinv)
+	u2.Mod(u2, fr.Modulus())
+	var Q starkcurve.G1Jac
+	Q.JointScalarMultiplicationBase(P, u1, u2)
+	pk.A.FromJacobian(&Q)
+	return nil
 }
 
 // Bytes returns the binary representation of pk,
@@ -97,9 +135,29 @@ func (sig *Signature) Bytes() []byte {
 // It returns the number of bytes read from buf.
 func (sig *Signature) SetBytes(buf []byte) (int, error) {
 	n := 0
-	if len(buf) < sizeSignature {
-		return n, io.ErrShortBuffer
+	if len(buf) != sizeSignature {
+		return n, errWrongSize
 	}
+
+	// S, R < R_mod (to avoid malleability)
+	frMod := fr.Modulus()
+	zero := big.NewInt(0)
+	bufBigInt := new(big.Int)
+	bufBigInt.SetBytes(buf[:sizeFr])
+	if bufBigInt.Cmp(zero) == 0 {
+		return 0, errZero
+	}
+	if bufBigInt.Cmp(frMod) != -1 {
+		return 0, errRBiggerThanRMod
+	}
+	bufBigInt.SetBytes(buf[sizeFr : 2*sizeFr])
+	if bufBigInt.Cmp(zero) == 0 {
+		return 0, errZero
+	}
+	if bufBigInt.Cmp(frMod) != -1 {
+		return 0, errSBiggerThanRMod
+	}
+
 	subtle.ConstantTimeCopy(1, sig.R[:], buf[:sizeFr])
 	n += sizeFr
 	subtle.ConstantTimeCopy(1, sig.S[:], buf[sizeFr:2*sizeFr])

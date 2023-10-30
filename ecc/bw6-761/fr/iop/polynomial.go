@@ -1,4 +1,4 @@
-// Copyright 2020 ConsenSys Software Inc.
+// Copyright 2020 Consensys Software Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import (
 	"io"
 	"math/big"
 	"math/bits"
+	"runtime"
 
 	"github.com/consensys/gnark-crypto/ecc/bw6-761/fr"
 	"github.com/consensys/gnark-crypto/ecc/bw6-761/fr/fft"
@@ -101,6 +102,28 @@ func (p *Polynomial) BlindedSize() int {
 	return p.blindedSize
 }
 
+// Size returns the real size of the polynomial (seen as a vector).
+// For instance if len(P)=32 but P.Size=8, it means that P has been
+// extended (e.g. it is evaluated on a larger set) but P is a polynomial
+// of degree 7.
+func (p *Polynomial) Size() int {
+	return p.size
+}
+
+// SetSize sets the size of the polynomial.
+// size is the real size of the polynomial (seen as a vector).
+// For instance if len(P)=32 but P.size=8, it means that P has been
+// extended (e.g. it is evaluated on a larger set) but P is a polynomial
+// of degree 7.
+func (p *Polynomial) SetSize(size int) {
+	p.size = size
+}
+
+// SetBlindedSize sets the blinded size of the polynomial.
+func (p *Polynomial) SetBlindedSize(size int) {
+	p.blindedSize = size
+}
+
 // Blind blinds a polynomial q by adding Q(X)*(X^{n}-1),
 // where deg Q = blindingOrder and Q is random, and n is the
 // size of q. Sets the result to p and returns it.
@@ -146,11 +169,13 @@ func (p *Polynomial) Evaluate(x fr.Element) fr.Element {
 		return p.polynomial.evaluate(x)
 	}
 
-	// TODO find a way to retrieve the root properly instead of re generating the fft domain
-	d := fft.NewDomain(uint64(p.size))
 	var g fr.Element
 	if p.shift <= 5 {
-		g = smallExp(d.Generator, p.shift)
+		gen, err := fft.Generator(uint64(p.size))
+		if err != nil {
+			panic(err)
+		}
+		g = smallExp(gen, p.shift)
 		x.Mul(&x, &g)
 		return p.polynomial.evaluate(x)
 	}
@@ -274,25 +299,31 @@ func (p *Polynomial) ToBitReverse() *Polynomial {
 
 // ToLagrange converts p to Lagrange form.
 // Leaves p unchanged if p was already in Lagrange form.
-func (p *Polynomial) ToLagrange(d *fft.Domain) *Polynomial {
+func (p *Polynomial) ToLagrange(d *fft.Domain, nbTasks ...int) *Polynomial {
 	id := p.Form
 	p.grow(int(d.Cardinality))
+
+	n := runtime.NumCPU()
+	if len(nbTasks) > 0 {
+		n = nbTasks[0]
+	}
+
 	switch id {
 	case canonicalRegular:
 		p.Layout = BitReverse
-		d.FFT((*p.coefficients), fft.DIF)
+		d.FFT((*p.coefficients), fft.DIF, fft.WithNbTasks(n))
 	case canonicalBitReverse:
 		p.Layout = Regular
-		d.FFT((*p.coefficients), fft.DIT)
+		d.FFT((*p.coefficients), fft.DIT, fft.WithNbTasks(n))
 	case lagrangeRegular, lagrangeBitReverse:
 		return p
 	case lagrangeCosetRegular:
 		p.Layout = Regular
-		d.FFTInverse((*p.coefficients), fft.DIF, true)
+		d.FFTInverse((*p.coefficients), fft.DIF, fft.OnCoset(), fft.WithNbTasks(n))
 		d.FFT((*p.coefficients), fft.DIT)
 	case lagrangeCosetBitReverse:
 		p.Layout = BitReverse
-		d.FFTInverse((*p.coefficients), fft.DIT, true)
+		d.FFTInverse((*p.coefficients), fft.DIT, fft.OnCoset(), fft.WithNbTasks(n))
 		d.FFT((*p.coefficients), fft.DIF)
 	default:
 		panic("unknown ID")
@@ -303,24 +334,28 @@ func (p *Polynomial) ToLagrange(d *fft.Domain) *Polynomial {
 
 // ToCanonical converts p to canonical form.
 // Leaves p unchanged if p was already in Canonical form.
-func (p *Polynomial) ToCanonical(d *fft.Domain) *Polynomial {
+func (p *Polynomial) ToCanonical(d *fft.Domain, nbTasks ...int) *Polynomial {
 	id := p.Form
 	p.grow(int(d.Cardinality))
+	n := runtime.NumCPU()
+	if len(nbTasks) > 0 {
+		n = nbTasks[0]
+	}
 	switch id {
 	case canonicalRegular, canonicalBitReverse:
 		return p
 	case lagrangeRegular:
 		p.Layout = BitReverse
-		d.FFTInverse((*p.coefficients), fft.DIF)
+		d.FFTInverse((*p.coefficients), fft.DIF, fft.WithNbTasks(n))
 	case lagrangeBitReverse:
 		p.Layout = Regular
-		d.FFTInverse((*p.coefficients), fft.DIT)
+		d.FFTInverse((*p.coefficients), fft.DIT, fft.WithNbTasks(n))
 	case lagrangeCosetRegular:
 		p.Layout = BitReverse
-		d.FFTInverse((*p.coefficients), fft.DIF, true)
+		d.FFTInverse((*p.coefficients), fft.DIF, fft.OnCoset(), fft.WithNbTasks(n))
 	case lagrangeCosetBitReverse:
 		p.Layout = Regular
-		d.FFTInverse((*p.coefficients), fft.DIT, true)
+		d.FFTInverse((*p.coefficients), fft.DIT, fft.OnCoset(), fft.WithNbTasks(n))
 	default:
 		panic("unknown ID")
 	}
@@ -342,18 +377,18 @@ func (p *Polynomial) ToLagrangeCoset(d *fft.Domain) *Polynomial {
 	switch id {
 	case canonicalRegular:
 		p.Layout = BitReverse
-		d.FFT((*p.coefficients), fft.DIF, true)
+		d.FFT((*p.coefficients), fft.DIF, fft.OnCoset())
 	case canonicalBitReverse:
 		p.Layout = Regular
-		d.FFT((*p.coefficients), fft.DIT, true)
+		d.FFT((*p.coefficients), fft.DIT, fft.OnCoset())
 	case lagrangeRegular:
 		p.Layout = Regular
 		d.FFTInverse((*p.coefficients), fft.DIF)
-		d.FFT((*p.coefficients), fft.DIT, true)
+		d.FFT((*p.coefficients), fft.DIT, fft.OnCoset())
 	case lagrangeBitReverse:
 		p.Layout = BitReverse
 		d.FFTInverse((*p.coefficients), fft.DIT)
-		d.FFT((*p.coefficients), fft.DIF, true)
+		d.FFT((*p.coefficients), fft.DIF, fft.OnCoset())
 	case lagrangeCosetRegular, lagrangeCosetBitReverse:
 		return p
 	default:

@@ -1,4 +1,4 @@
-// Copyright 2020 ConsenSys Software Inc.
+// Copyright 2020 Consensys Software Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,11 +38,6 @@ type G1Jac struct {
 // g1JacExtended parameterized Jacobian coordinates (x=X/ZZ, y=Y/ZZZ, ZZ³=ZZZ²)
 type g1JacExtended struct {
 	X, Y, ZZ, ZZZ fp.Element
-}
-
-// g1Proj point in projective coordinates
-type g1Proj struct {
-	x, y, z fp.Element
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -93,6 +88,16 @@ func (p *G1Affine) Add(a, b *G1Affine) *G1Affine {
 	p1.FromAffine(a)
 	p2.FromAffine(b)
 	p1.AddAssign(&p2)
+	p.FromJacobian(&p1)
+	return p
+}
+
+// Double doubles a point in affine coordinates.
+// This should rarely be used as it is very inefficient compared to Jacobian
+func (p *G1Affine) Double(a *G1Affine) *G1Affine {
+	var p1 G1Jac
+	p1.FromAffine(a)
+	p1.Double(&p1)
 	p.FromJacobian(&p1)
 	return p
 }
@@ -179,17 +184,30 @@ func (p *G1Jac) Set(a *G1Jac) *G1Jac {
 
 // Equal tests if two points (in Jacobian coordinates) are equal
 func (p *G1Jac) Equal(a *G1Jac) bool {
-
-	if p.Z.IsZero() && a.Z.IsZero() {
-		return true
+	// If one point is infinity, the other must also be infinity.
+	if p.Z.IsZero() {
+		return a.Z.IsZero()
 	}
-	_p := G1Affine{}
-	_p.FromJacobian(p)
+	// If the other point is infinity, return false since we can't
+	// the following checks would be incorrect.
+	if a.Z.IsZero() {
+		return false
+	}
 
-	_a := G1Affine{}
-	_a.FromJacobian(a)
+	var pZSquare, aZSquare fp.Element
+	pZSquare.Square(&p.Z)
+	aZSquare.Square(&a.Z)
 
-	return _p.X.Equal(&_a.X) && _p.Y.Equal(&_a.Y)
+	var lhs, rhs fp.Element
+	lhs.Mul(&p.X, &aZSquare)
+	rhs.Mul(&a.X, &pZSquare)
+	if !lhs.Equal(&rhs) {
+		return false
+	}
+	lhs.Mul(&p.Y, &aZSquare).Mul(&lhs, &a.Z)
+	rhs.Mul(&a.Y, &pZSquare).Mul(&rhs, &p.Z)
+
+	return lhs.Equal(&rhs)
 }
 
 // Neg computes -G
@@ -420,8 +438,11 @@ func (p *G1Jac) mulWindowed(a *G1Jac, s *big.Int) *G1Jac {
 	var res G1Jac
 	var ops [3]G1Jac
 
-	res.Set(&g1Infinity)
 	ops[0].Set(a)
+	if s.Sign() == -1 {
+		ops[0].Neg(&ops[0])
+	}
+	res.Set(&g1Infinity)
 	ops[1].Double(&ops[0])
 	ops[2].Set(&ops[0]).AddAssign(&ops[1])
 
@@ -663,6 +684,10 @@ func (p *g1JacExtended) setInfinity() *g1JacExtended {
 	p.ZZ = fp.Element{}
 	p.ZZZ = fp.Element{}
 	return p
+}
+
+func (p *g1JacExtended) IsZero() bool {
+	return p.ZZ.IsZero()
 }
 
 // fromJacExtended sets Q in affine coordinates
@@ -946,81 +971,6 @@ func (p *g1JacExtended) doubleMixed(q *G1Affine) *g1JacExtended {
 	return p
 }
 
-// -------------------------------------------------------------------------------------------------
-// Homogenous projective
-
-// Set sets p to the provided point
-func (p *g1Proj) Set(a *g1Proj) *g1Proj {
-	p.x, p.y, p.z = a.x, a.y, a.z
-	return p
-}
-
-// Neg computes -G
-func (p *g1Proj) Neg(a *g1Proj) *g1Proj {
-	*p = *a
-	p.y.Neg(&a.y)
-	return p
-}
-
-// FromAffine sets p = Q, p in homogenous projective, Q in affine
-func (p *g1Proj) FromAffine(Q *G1Affine) *g1Proj {
-	if Q.X.IsZero() && Q.Y.IsZero() {
-		p.z.SetZero()
-		p.x.SetOne()
-		p.y.SetOne()
-		return p
-	}
-	p.z.SetOne()
-	p.x.Set(&Q.X)
-	p.y.Set(&Q.Y)
-	return p
-}
-
-// BatchProjectiveToAffineG1 converts points in Projective coordinates to Affine coordinates
-// performing a single field inversion (Montgomery batch inversion trick).
-func BatchProjectiveToAffineG1(points []g1Proj) []G1Affine {
-	result := make([]G1Affine, len(points))
-	zeroes := make([]bool, len(points))
-	accumulator := fp.One()
-
-	// batch invert all points[].Z coordinates with Montgomery batch inversion trick
-	// (stores points[].Z^-1 in result[i].X to avoid allocating a slice of fr.Elements)
-	for i := 0; i < len(points); i++ {
-		if points[i].z.IsZero() {
-			zeroes[i] = true
-			continue
-		}
-		result[i].X = accumulator
-		accumulator.Mul(&accumulator, &points[i].z)
-	}
-
-	var accInverse fp.Element
-	accInverse.Inverse(&accumulator)
-
-	for i := len(points) - 1; i >= 0; i-- {
-		if zeroes[i] {
-			// do nothing, (X=0, Y=0) is infinity point in affine
-			continue
-		}
-		result[i].X.Mul(&result[i].X, &accInverse)
-		accInverse.Mul(&accInverse, &points[i].z)
-	}
-
-	// batch convert to affine.
-	parallel.Execute(len(points), func(start, end int) {
-		for i := start; i < end; i++ {
-			if zeroes[i] {
-				// do nothing, (X=0, Y=0) is infinity point in affine
-				continue
-			}
-			a := result[i].X
-			result[i].X.Mul(&points[i].x, &a)
-			result[i].Y.Mul(&points[i].y, &a)
-		}
-	})
-	return result
-}
-
 // BatchJacobianToAffineG1 converts points in Jacobian coordinates to Affine coordinates
 // performing a single field inversion (Montgomery batch inversion trick).
 func BatchJacobianToAffineG1(points []G1Jac) []G1Affine {
@@ -1133,7 +1083,7 @@ func BatchScalarMultiplicationG1(base *G1Affine, scalars []fr.Element) []G1Affin
 					continue
 				}
 
-				// if msbWindow bit is set, we need to substract
+				// if msbWindow bit is set, we need to subtract
 				if digit&1 == 0 {
 					// add
 					p.AddMixed(&baseTableAff[(digit>>1)-1])

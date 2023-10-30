@@ -10,6 +10,8 @@
 //	(Eₜ/𝔽p): Y² = X³+4 (M-type twist)
 //	r ∣ #E(Fp) and r ∣ #Eₜ(𝔽p)
 //
+// case t % r % x₀ = 3
+//
 // Extension fields tower:
 //
 //	𝔽p³[u] = 𝔽p/u³+4
@@ -32,6 +34,8 @@ package bw6761
 import (
 	"math/big"
 
+	"github.com/consensys/gnark-crypto/ecc/bw6-761/internal/fptower"
+
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark-crypto/ecc/bw6-761/fp"
 	"github.com/consensys/gnark-crypto/ecc/bw6-761/fr"
@@ -40,7 +44,8 @@ import (
 // ID BW6_761 ID
 const ID = ecc.BW6_761
 
-// bCurveCoeff b coeff of the curve Y²=X³+b
+// aCurveCoeff is the a coefficients of the curve Y²=X³+ax+b
+var aCurveCoeff fp.Element
 var bCurveCoeff fp.Element
 
 // bTwistCurveCoeff b coeff of the twist (defined over 𝔽p) curve
@@ -77,8 +82,14 @@ var glvBasis ecc.Lattice
 // seed x₀ of the curve
 var xGen big.Int
 
-func init() {
+// 𝔽p3
+type E3 = fptower.E3
 
+// 𝔽p6
+type E6 = fptower.E6
+
+func init() {
+	aCurveCoeff.SetUint64(0)
 	bCurveCoeff.SetOne().Neg(&bCurveCoeff)
 	// M-twist
 	bTwistCurveCoeff.SetUint64(4)
@@ -125,4 +136,9 @@ func Generators() (g1Jac G1Jac, g2Jac G2Jac, g1Aff G1Affine, g2Aff G2Affine) {
 	g1Jac = g1Gen
 	g2Jac = g2Gen
 	return
+}
+
+// CurveCoefficients returns the a, b coefficients of the curve equation.
+func CurveCoefficients() (a, b fp.Element) {
+	return aCurveCoeff, bCurveCoeff
 }

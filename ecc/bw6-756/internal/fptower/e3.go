@@ -21,7 +21,7 @@ type E3 struct {
 	A0, A1, A2 fp.Element
 }
 
-// Equal returns true if z equals x, fasle otherwise
+// Equal returns true if z equals x, false otherwise
 // note this is more efficient than calling "z == x"
 func (z *E3) Equal(x *E3) bool {
 	return z.A0.Equal(&x.A0) && z.A1.Equal(&x.A1) && z.A2.Equal(&x.A2)
@@ -78,7 +78,7 @@ func (z *E3) SetRandom() (*E3, error) {
 	return z, nil
 }
 
-// IsZero returns true if the two elements are equal, fasle otherwise
+// IsZero returns true if the two elements are equal, false otherwise
 func (z *E3) IsZero() bool {
 	return z.A0.IsZero() && z.A1.IsZero() && z.A2.IsZero()
 }
@@ -138,6 +138,34 @@ func (z *E3) MulByElement(x *E3, y *fp.Element) *E3 {
 	z.A1.Mul(&x.A1, &_y)
 	z.A2.Mul(&x.A2, &_y)
 	return z
+}
+
+// MulBy12 multiplication by sparse element (0,b1,b2)
+func (x *E3) MulBy12(b1, b2 *fp.Element) *E3 {
+	var t1, t2, c0, tmp, c1, c2 fp.Element
+	t1.Mul(&x.A1, b1)
+	t2.Mul(&x.A2, b2)
+	c0.Add(&x.A1, &x.A2)
+	tmp.Add(b1, b2)
+	c0.Mul(&c0, &tmp)
+	c0.Sub(&c0, &t1)
+	c0.Sub(&c0, &t2)
+	c0.MulByNonResidue(&c0)
+	c1.Add(&x.A0, &x.A1)
+	c1.Mul(&c1, b1)
+	c1.Sub(&c1, &t1)
+	tmp.MulByNonResidue(&t2)
+	c1.Add(&c1, &tmp)
+	tmp.Add(&x.A0, &x.A2)
+	c2.Mul(b2, &tmp)
+	c2.Sub(&c2, &t2)
+	c2.Add(&c2, &t1)
+
+	x.A0 = c0
+	x.A1 = c1
+	x.A2 = c2
+
+	return x
 }
 
 // MulBy01 multiplication by sparse element (c0,c1,0)

@@ -1,4 +1,4 @@
-// Copyright 2020 ConsenSys Software Inc.
+// Copyright 2020 Consensys Software Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,8 +18,20 @@ package eddsa
 
 import (
 	"crypto/subtle"
+	"errors"
+	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
+	"github.com/consensys/gnark-crypto/ecc/bls12-381/twistededwards"
 	"io"
+	"math/big"
 )
+
+// cf point.go (ugly copy)
+const mUnmask = 0x7f
+
+var errWrongSize = errors.New("wrong size buffer")
+var errSBiggerThanRMod = errors.New("s >= r_mod")
+var errRBiggerThanPMod = errors.New("r >= p_mod")
+var errZero = errors.New("zero value")
 
 // Bytes returns the binary representation of the public key
 // follows https://tools.ietf.org/html/rfc8032#section-3.1
@@ -96,7 +108,7 @@ func (privKey *PrivateKey) SetBytes(buf []byte) (int, error) {
 // as a byte array of size 3*sizeFr x||y||s where
 //   - x, y are the coordinates of a point on the twisted
 //     Edwards represented in big endian
-//   - s=r+h(r,a,m) mod l, the Hasse bound guarantess that
+//   - s=r+h(r,a,m) mod l, the Hasse bound guarantees that
 //     s is smaller than sizeFr (in particular it is supposed
 //     s is NOT blinded)
 func (sig *Signature) Bytes() []byte {
@@ -111,16 +123,47 @@ func (sig *Signature) Bytes() []byte {
 // buf is read interpreted as x||y||s where
 //   - x,y are the coordinates of a point on the twisted
 //     Edwards represented in big endian
-//   - s=r+h(r,a,m) mod l, the Hasse bound guarantess that
+//   - s=r+h(r,a,m) mod l, the Hasse bound guarantees that
 //     s is smaller than sizeFr (in particular it is supposed
 //     s is NOT blinded)
 //
 // It returns the number of bytes read from buf.
 func (sig *Signature) SetBytes(buf []byte) (int, error) {
 	n := 0
-	if len(buf) < sizeSignature {
-		return n, io.ErrShortBuffer
+	if len(buf) != sizeSignature {
+		return n, errWrongSize
 	}
+
+	// R < P_mod (to avoid malleability)
+	// P_mod = field of def of the twisted Edwards = Fr snark field
+	fpMod := fr.Modulus()
+	zero := big.NewInt(0)
+	bufBigInt := new(big.Int)
+	bufCopy := make([]byte, fr.Bytes)
+	for i := 0; i < sizeFr; i++ {
+		bufCopy[sizeFr-1-i] = buf[i]
+	}
+	bufCopy[0] &= mUnmask
+	bufBigInt.SetBytes(bufCopy)
+	if bufBigInt.Cmp(zero) == 0 {
+		return 0, errZero
+	}
+	if bufBigInt.Cmp(fpMod) != -1 {
+		return 0, errRBiggerThanPMod
+	}
+
+	// S < R_mod (to avoid malleability)
+	// R_mod is the relevant group size of the twisted Edwards NOT the fr snark field so it's supposedly smaller
+	bufBigInt.SetBytes(buf[sizeFr : 2*sizeFr])
+	if bufBigInt.Cmp(zero) == 0 {
+		return 0, errZero
+	}
+	cp := twistededwards.GetEdwardsCurve()
+	if bufBigInt.Cmp(&cp.Order) != -1 {
+		return 0, errSBiggerThanRMod
+	}
+
+	// deserialisation
 	if _, err := sig.R.SetBytes(buf[:sizeFr]); err != nil {
 		return 0, err
 	}
