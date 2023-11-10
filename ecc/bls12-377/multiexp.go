@@ -17,8 +17,8 @@
 package bls12377
 
 /*
-#cgo LDFLAGS: -L./lib -lblst_msm
-#include "./lib/yyrid.h"
+#cgo LDFLAGS: -L./lib -licicle_msm
+#include "./lib/icicle.h"
 */
 import "C"
 
@@ -28,6 +28,7 @@ import (
 	"unsafe"
 	"errors"
 	"github.com/consensys/gnark-crypto/ecc"
+	"github.com/consensys/gnark-crypto/ecc/bls12-377/fp"
 	"github.com/consensys/gnark-crypto/ecc/bls12-377/fr"
 	"github.com/consensys/gnark-crypto/internal/parallel"
 	"math"
@@ -35,9 +36,9 @@ import (
 )
 
 var glob_started = false
-var glob_ctx = unsafe.Pointer(nil)
+// var glob_ctx = unsafe.Pointer(nil)
 var glob_mutex = sync.Mutex{};
-
+/*
 func call_multi_scalar_init(points []G1Affine) unsafe.Pointer {
 	type RustG1Affine struct {
 		X, Y     [6]uint64
@@ -75,6 +76,36 @@ func (p *G1Jac) call_multi_scalar_mult(ctx unsafe.Pointer, scalars [][4]uint64) 
 		C.ulong(len(scalars)),
 	)
 }
+*/
+func (p *G1Affine) call_icicle_msm(points []G1Affine, scalars [][4]uint64) {
+	icicle_out := [144]byte{};
+
+	ret := C.msm_cuda_bls12_377(
+		unsafe.Pointer(&icicle_out),
+		unsafe.Pointer(&points[0]),
+		unsafe.Pointer(&scalars[0]),
+		C.size_t(len(points)),
+		0,
+	)
+	if ret != 0 {
+		fmt.Println("ICICLE ERROR")
+	}
+
+	post_ppX, _ := fp.LittleEndian.Element((*[48]byte)(icicle_out[0:48]))
+	post_ppY, _ := fp.LittleEndian.Element((*[48]byte)(icicle_out[48:96]))
+	post_ppZ, _ := fp.LittleEndian.Element((*[48]byte)(icicle_out[96:]))
+
+	ppZinv := fp.Element{}
+	ppZinv.Inverse(&post_ppZ)
+
+	goodX := fp.Element{}
+	goodX.Mul(&post_ppX, &ppZinv);
+	goodY := fp.Element{}
+	goodY.Mul(&post_ppY, &ppZinv);
+
+	*p = G1Affine{X: goodX, Y: goodY};
+}
+
 // MultiExp implements section 4 of https://eprint.iacr.org/2012/549.pdf
 //
 // This call return an error if len(scalars) != len(points) or if provided config is invalid.
@@ -87,40 +118,28 @@ func (p *G1Affine) MultiExp(points []G1Affine, scalars []fr.Element, config ecc.
 
 	glob_mutex.Lock()
 
-	newpoints := make([]G1Affine, 1 << 26) // TODO: round up to multiple
-	newscalars := make([][4]uint64, 1 << 26)
 
+	newpoints := make([]G1Affine, len(points))
+	newscalars := make([][4]uint64, len(scalars))
 	for i := 0; i < len(points); i++ {
-		newpoints[i] = points[i]
+		newpoints[i] = G1Affine{X: points[i].X.Bits(), Y: points[i].Y.Bits()}
 	}
 	for i := 0; i < len(scalars); i++ {
-		if i < 20 { // TODO: remove this condition without yyrid crashing
-			newscalars[i] = scalars[i].Bits()
-		}
+		newscalars[i] = scalars[i].Bits()
 	}
 
-	fmt.Println("starting multiexp", len(newpoints))
+	fmt.Println("starting icicle multiexp", len(points), len(scalars))
+	p.call_icicle_msm(newpoints, newscalars)
+	fmt.Println("icicle gives", *p)
 
-	pp := G1Jac{}
-	ctx := call_multi_scalar_init(newpoints)
-	pp.call_multi_scalar_mult(ctx, newscalars)
-	p.FromJacobian(&pp)
+	// {
+	// 	comppj := G1Jac{}
+	// 	comppj.MultiExp(points, scalars, config)
 
-	fmt.Println(*p)
-
-	/* {
-		comparisonscalars := make([]fr.Element, 1 << 26)
-		for i := 0; i < len(scalars); i++ {
-			if i < 20 {
-				comparisonscalars[i] = scalars[i];
-			}
-		}
-		comppj := G1Jac{}
-		comppa := G1Affine{}
-		comppj.MultiExp(newpoints, comparisonscalars, config)
-		comppa.FromJacobian(&comppj)
-		fmt.Println("Gnark built in MSM gives", comppa)
-	} */
+	// 	comppa := G1Affine{}
+	// 	comppa.FromJacobian(&comppj)
+	// 	fmt.Println("Gnark built in MSM gives", comppa)
+	// }
 
 	glob_mutex.Unlock()
 	return p, nil
