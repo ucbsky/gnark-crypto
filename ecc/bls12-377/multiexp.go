@@ -25,6 +25,7 @@ import "C"
 import (
 	"fmt"
 	"sync"
+	"time"
 	"unsafe"
 	"errors"
 	"github.com/consensys/gnark-crypto/ecc"
@@ -35,49 +36,30 @@ import (
 	"runtime"
 )
 
-var glob_started = false
-// var glob_ctx = unsafe.Pointer(nil)
+
+
+
+type semaphore struct {    
+	semC chan struct{}
+}
+func NewSema(maxConcurrency int) *semaphore {    
+	return &semaphore{ semC: make(chan struct{}, maxConcurrency),}
+}
+func (s *semaphore) Acquire() {    
+	s.semC <- struct{}{}
+	}
+func (s *semaphore) Release() {    
+	<-s.semC
+}
+
+var NUM_GPUS = 3;
+var glob_busy = make([]bool, NUM_GPUS);
+var glob_sema = NewSema(NUM_GPUS);
 var glob_mutex = sync.Mutex{};
-/*
-func call_multi_scalar_init(points []G1Affine) unsafe.Pointer {
-	type RustG1Affine struct {
-		X, Y     [6]uint64
-		infinity bool
-	}
 
-	if glob_started {
-		return glob_ctx
-	}
-	glob_started = true
 
-	rust_points := make([]RustG1Affine, len(points))
-	for i := 0; i < len(points); i++ {
-		rust_points[i] = RustG1Affine{
-			points[i].X,
-			points[i].Y,
-			points[i].IsInfinity(),
-		}
-	}
 
-	ctx := C.multi_scalar_init_wrapper(
-		unsafe.Pointer(&rust_points[0]),
-		C.ulong(len(rust_points)),
-	)
-
-	glob_ctx = ctx
-	return ctx
-}
-
-func (p *G1Jac) call_multi_scalar_mult(ctx unsafe.Pointer, scalars [][4]uint64) {
-	C.multi_scalar_mult_wrapper(
-		unsafe.Pointer(p),
-		ctx,
-		unsafe.Pointer(&scalars[0]),
-		C.ulong(len(scalars)),
-	)
-}
-*/
-func (p *G1Affine) call_icicle_msm(points []G1Affine, scalars [][4]uint64) {
+func (p *G1Affine) call_icicle_msm(points []G1Affine, scalars [][4]uint64, dev_id int) {
 	icicle_out := [144]byte{};
 
 	ret := C.msm_cuda_bls12_377(
@@ -85,7 +67,7 @@ func (p *G1Affine) call_icicle_msm(points []G1Affine, scalars [][4]uint64) {
 		unsafe.Pointer(&points[0]),
 		unsafe.Pointer(&scalars[0]),
 		C.size_t(len(points)),
-		0,
+		C.size_t(dev_id),
 	)
 	if ret != 0 {
 		fmt.Println("ICICLE ERROR")
@@ -116,8 +98,8 @@ func (p *G1Affine) MultiExp(points []G1Affine, scalars []fr.Element, config ecc.
 	//}
 	//p.FromJacobian(&_p)
 
-	glob_mutex.Lock()
-
+	fmt.Println("want gpu")
+	start := time.Now()
 
 	newpoints := make([]G1Affine, len(points))
 	newscalars := make([][4]uint64, len(scalars))
@@ -128,9 +110,31 @@ func (p *G1Affine) MultiExp(points []G1Affine, scalars []fr.Element, config ecc.
 		newscalars[i] = scalars[i].Bits()
 	}
 
-	fmt.Println("starting icicle multiexp", len(points), len(scalars))
-	p.call_icicle_msm(newpoints, newscalars)
-	fmt.Println("icicle gives", *p)
+	elapsedCopy := time.Now().Sub(start)
+
+	var acquired_gpu = 12345
+	glob_sema.Acquire()
+	glob_mutex.Lock()
+	for i := 0; i < len(glob_busy); i++ {
+		if !glob_busy[i] {
+			glob_busy[i] = true
+			acquired_gpu = i
+			break;
+		}
+	}
+	glob_mutex.Unlock()
+
+	
+	fmt.Println("starting icicle multiexp", len(points), len(scalars), acquired_gpu)
+
+	start = time.Now()
+
+	// comppj := G1Jac{}
+	// comppj.MultiExp(points, scalars, config)
+	// p.FromJacobian(&comppj)
+
+	p.call_icicle_msm(newpoints, newscalars, acquired_gpu)
+	elapsedIcicle := time.Now().Sub(start)
 
 	// {
 	// 	comppj := G1Jac{}
@@ -141,7 +145,13 @@ func (p *G1Affine) MultiExp(points []G1Affine, scalars []fr.Element, config ecc.
 	// 	fmt.Println("Gnark built in MSM gives", comppa)
 	// }
 
+	fmt.Println("finish icicle multiexp", acquired_gpu, elapsedCopy, elapsedIcicle)
+	
+
+	glob_mutex.Lock()
+	glob_busy[acquired_gpu] = false
 	glob_mutex.Unlock()
+	glob_sema.Release()
 	return p, nil
 }
 
