@@ -24,6 +24,7 @@ import "C"
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 	"unsafe"
@@ -209,6 +210,12 @@ func (p *G1Affine) MultiExp(points []G1Affine, scalars []fr.Element, config ecc.
 
 	if PRINT_INFO {
 		fmt.Println("finish icicle multiexp", acquired_gpu, elapsedIcicle)
+		fmt.Println("icicle gives", *p)
+	}
+	var emptyAffine G1Affine;
+	if *p == emptyAffine {
+		fmt.Println("ICICLE RETURNED 0")
+		log.Fatal("ICICLE RETURNED 0")
 	}
 	
 	if SCHEDULE {
