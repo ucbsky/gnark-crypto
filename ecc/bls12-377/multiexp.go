@@ -52,7 +52,11 @@ func (s *semaphore) Release() {
 	<-s.semC
 }
 
-var NUM_GPUS = 3;
+var NUM_GPUS = 2;
+var TRANSLATE_PAR = true;
+var SCHEDULE = false;
+var PRINT_INFO = false;
+var glob_use_gpu = 0;
 var glob_busy = make([]bool, NUM_GPUS);
 var glob_sema = NewSema(NUM_GPUS);
 var glob_mutex = sync.Mutex{};
@@ -67,6 +71,7 @@ func (p *G1Affine) call_icicle_msm(points []G1Affine, scalars [][4]uint64, dev_i
 		unsafe.Pointer(&points[0]),
 		unsafe.Pointer(&scalars[0]),
 		C.size_t(len(points)),
+		0,
 		C.size_t(dev_id),
 	)
 	if ret != 0 {
@@ -88,6 +93,26 @@ func (p *G1Affine) call_icicle_msm(points []G1Affine, scalars [][4]uint64, dev_i
 	*p = G1Affine{X: goodX, Y: goodY};
 }
 
+func translate_points(points []G1Affine, newpoints[]G1Affine, st int, n int) {
+	stop := st + n
+	if len(points) < stop {
+		stop = len(points)
+	}
+	for i := st; i < stop; i++ {
+		newpoints[i] = G1Affine{X: points[i].X.Bits(), Y: points[i].Y.Bits()}
+	}
+}
+
+func translate_scalars(scalars []fr.Element, newscalars [][4]uint64, st int, n int) {
+	stop := st + n
+	if len(scalars) < stop {
+		stop = len(scalars)
+	}
+	for i := st; i < stop; i++ {
+		newscalars[i] = scalars[i].Bits()
+	}
+}
+
 // MultiExp implements section 4 of https://eprint.iacr.org/2012/549.pdf
 //
 // This call return an error if len(scalars) != len(points) or if provided config is invalid.
@@ -98,34 +123,71 @@ func (p *G1Affine) MultiExp(points []G1Affine, scalars []fr.Element, config ecc.
 	//}
 	//p.FromJacobian(&_p)
 
-	fmt.Println("want gpu")
+	if PRINT_INFO {
+		fmt.Println("want gpu")
+	}
 	start := time.Now()
 
 	newpoints := make([]G1Affine, len(points))
 	newscalars := make([][4]uint64, len(scalars))
-	for i := 0; i < len(points); i++ {
-		newpoints[i] = G1Affine{X: points[i].X.Bits(), Y: points[i].Y.Bits()}
-	}
-	for i := 0; i < len(scalars); i++ {
-		newscalars[i] = scalars[i].Bits()
-	}
-
-	elapsedCopy := time.Now().Sub(start)
-
-	var acquired_gpu = 12345
-	glob_sema.Acquire()
-	glob_mutex.Lock()
-	for i := 0; i < len(glob_busy); i++ {
-		if !glob_busy[i] {
-			glob_busy[i] = true
-			acquired_gpu = i
-			break;
+	if TRANSLATE_PAR {
+		batch_size := len(points) / 22
+		if batch_size == 0 {
+			batch_size = len(points)
+		}
+		var wg sync.WaitGroup
+		for i := 0; i < len(points); i += batch_size {
+			wg.Add(1)
+			go func(ind int) {
+				translate_points(points, newpoints, ind, batch_size)
+				wg.Done()
+			}(i)
+		}
+		for i := 0; i < len(scalars); i += batch_size {
+			wg.Add(1)
+			go func(ind int) {
+				translate_scalars(scalars, newscalars, ind, batch_size)
+				wg.Done()
+			}(i)
+		}
+		wg.Wait()
+	} else {
+		for i := 0; i < len(points); i++ {
+			newpoints[i] = G1Affine{X: points[i].X.Bits(), Y: points[i].Y.Bits()}
+		}
+		for i := 0; i < len(scalars); i++ {
+			newscalars[i] = scalars[i].Bits()
 		}
 	}
-	glob_mutex.Unlock()
-
 	
-	fmt.Println("starting icicle multiexp", len(points), len(scalars), acquired_gpu)
+
+	elapsedCopy := time.Now().Sub(start)
+	if PRINT_INFO {
+		fmt.Println("finished translate", elapsedCopy)
+	}
+
+	var acquired_gpu = 12345
+	if SCHEDULE {
+		glob_sema.Acquire()
+		glob_mutex.Lock()
+		for i := 0; i < len(glob_busy); i++ {
+			if !glob_busy[i] {
+				glob_busy[i] = true
+				acquired_gpu = i
+				break;
+			}
+		}
+		glob_mutex.Unlock()
+	} else {
+		glob_mutex.Lock()
+		acquired_gpu = glob_use_gpu;
+		glob_use_gpu = (glob_use_gpu + 1) % NUM_GPUS;
+		glob_mutex.Unlock()
+	}
+
+	if PRINT_INFO {
+		fmt.Println("starting icicle multiexp", len(points), len(scalars), acquired_gpu)
+	}
 
 	start = time.Now()
 
@@ -145,13 +207,16 @@ func (p *G1Affine) MultiExp(points []G1Affine, scalars []fr.Element, config ecc.
 	// 	fmt.Println("Gnark built in MSM gives", comppa)
 	// }
 
-	fmt.Println("finish icicle multiexp", acquired_gpu, elapsedCopy, elapsedIcicle)
+	if PRINT_INFO {
+		fmt.Println("finish icicle multiexp", acquired_gpu, elapsedIcicle)
+	}
 	
-
-	glob_mutex.Lock()
-	glob_busy[acquired_gpu] = false
-	glob_mutex.Unlock()
-	glob_sema.Release()
+	if SCHEDULE {
+		glob_mutex.Lock()
+		glob_busy[acquired_gpu] = false
+		glob_mutex.Unlock()
+		glob_sema.Release()
+	}
 	return p, nil
 }
 
