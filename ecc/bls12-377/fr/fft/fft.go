@@ -17,29 +17,12 @@
 package fft
 
 import (
-	// "errors"
-	"fmt"
-	// "log"
-	"math/bits"
-	"sync"
-	"time"
-	"os"
-	"unsafe"
-
-	//"github.com/consensys/gnark-crypto/ecc"
+	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark-crypto/internal/parallel"
-
-	// "github.com/ingonyama-zk/icicle/goicicle/curves/bls12377"
+	"math/bits"
 
 	"github.com/consensys/gnark-crypto/ecc/bls12-377/fr"
-	// "sync"
 )
-
-/*
-#cgo LDFLAGS: -L../../lib -licicle_msm
-#include "../../lib/icicle.h"
-*/
-import "C"
 
 // Decimation is used in the FFT call to select decimation in time or in frequency
 type Decimation uint8
@@ -49,319 +32,53 @@ const (
 	DIF
 )
 
-type G1ScalarField struct {
-	S [SCALAR_SIZE]uint32
-}
-
-// type fr.Element struct {
-// 	[4]uint64
-// }
-
-const SCALAR_SIZE = 8
-const BASE_SIZE = 12
-
-var NUM_GPUS = 1;
-var TRANSLATE_PAR = true;
-var SCHEDULE = false;
-var PRINT_INFO = false;
-var glob_use_gpu = 0;
-var glob_busy = make([]bool, NUM_GPUS);
-var glob_sema = NewSema(NUM_GPUS);
-var glob_mutex = sync.Mutex{};
-
-
-func frElementToG1ScalarField(element fr.Element) G1ScalarField {
-
-	var upper32 uint64
-	var lower32 uint64
-	var g1ScalarField G1ScalarField
-
-    for i := 0; i < 4; i++ {
-        // Extract the upper and lower 32 bits from each uint64
-        upper32 = element[i]
-		upper32 = upper32 >> 32
-        lower32 = element[i]
-
-        // Store the extracted values in the uint32 array
-        g1ScalarField.S[i*2] = uint32(upper32)
-        g1ScalarField.S[i*2+1] = uint32(lower32)
-    }
-
-    return g1ScalarField
-}
-
-func G1ScalarFieldtoFrElement(g1 G1ScalarField) fr.Element {
-
-	var element fr.Element
-
-	var upper32 uint32
-	var lower32 uint32
-
-    for i := 0; i < 4; i++ {
-        // Extract top and bottom
-        upper32 = g1.S[i*2]
-        lower32 = g1.S[i*2+1]
-
-		element[i] += uint64(upper32) << 32
-		element[i] += uint64(lower32)
-
-    }
-
-	return element
-
-}
-
-
-
-type semaphore struct {    
-	semC chan struct{}
-}
-func NewSema(maxConcurrency int) *semaphore {    
-	return &semaphore{ semC: make(chan struct{}, maxConcurrency),}
-}
-func (s *semaphore) Acquire() {    
-	s.semC <- struct{}{}
-	}
-func (s *semaphore) Release() {    
-	<-s.semC
-}
-
-
-func call_icicle_ntt(scalars []G1ScalarField, isInverse bool, deviceId int) uint64 {
-	
-	ret := C.ntt_cuda_bls12_377(
-		unsafe.Pointer(&scalars[0]),
-		C.size_t(len(scalars)),
-		C.bool(isInverse),
-		C.size_t(deviceId),
-	)
-
-	return uint64(ret)
-
-}
-
-func (domain *Domain) FFT(a []fr.Element, decimation Decimation, opts ...Option) {
-	
-	fmt.Fprintln(os.Stderr, "regular fft call")
-
-
-	opt := options(opts...)
-
-
-	start := time.Now()
-
-	// if coset != 0, scale by coset table
-	// should we always do decimation-in-time?
-	// I don't see icicle providing support for dif fft
-
-	if opt.coset {
-		parallel.Execute(len(a), func(start, end int) {
-			n := uint64(len(a))
-			nn := uint64(64 - bits.TrailingZeros64(n))
-			for i := start; i < end; i++ {
-				irev := int(bits.Reverse64(uint64(i)) >> nn)
-				a[i].Mul(&a[i], &domain.CosetTable[irev])
-			}
-		}, opt.nbTasks)
-	}
-
-
-	// if opt.coset {	
-	// 	if decimation == DIT {
-	// 		// scale by coset table (in bit reversed order)
-	// 		parallel.Execute(len(a), func(start, end int) {
-	// 			n := uint64(len(a))
-	// 			nn := uint64(64 - bits.TrailingZeros64(n))
-	// 			for i := start; i < end; i++ {
-	// 				irev := int(bits.Reverse64(uint64(i)) >> nn)
-	// 				a[i].Mul(&a[i], &domain.CosetTable[irev])
-	// 			}
-	// 		}, opt.nbTasks)
-	// 	} else {
-	// 		parallel.Execute(len(a), func(start, end int) {
-	// 			for i := start; i < end; i++ {
-	// 				a[i].Mul(&a[i], &domain.CosetTable[i])
-	// 			}
-	// 		}, opt.nbTasks)
-	// 	}
-	// }
-
-	// Field elements are represented as an array, and assumed to be in Montgomery form in all methods
-	translation_start := time.Now()
-
-	newscalars := make([]G1ScalarField, len(a))
-
-
-	// TODO: Optimize this translation & parallelize
-	for i := 0; i < len(a); i += 1 {
-		// Translate from fr.Element to G1ScalarField
-		newscalars[i] = frElementToG1ScalarField(a[i])
-	}
-
-	translation_end := time.Since(translation_start)
-
-	
-	// maxSplits := bits.TrailingZeros64(ecc.NextPowerOfTwo(uint64(opt.nbTasks)))
-	// if opt.nbTasks == 1 {
-	// 	maxSplits = -1
-	// }
-
-	// Give me a GPU
-
-	elapsedCopy := time.Since(start)
-	if PRINT_INFO {
-		fmt.Println("finished translate", elapsedCopy)
-	}
-
-	var acquired_gpu = 12345
-	if SCHEDULE {
-		glob_sema.Acquire()
-		glob_mutex.Lock()
-		for i := 0; i < len(glob_busy); i++ {
-			if !glob_busy[i] {
-				glob_busy[i] = true
-				acquired_gpu = i
-				break;
-			}
-		}
-		glob_mutex.Unlock()
-	} else {
-		glob_mutex.Lock()
-		acquired_gpu = glob_use_gpu;
-		glob_use_gpu = (glob_use_gpu + 1) % NUM_GPUS;
-		glob_mutex.Unlock()
-	}
-
-	if PRINT_INFO {
-		fmt.Println("starting icicle fft", len(a), acquired_gpu)
-	}
-
-	icicle_start := time.Now()
-
-	call_icicle_ntt(newscalars, false, acquired_gpu)
-
-	icicle_end := time.Since(icicle_start)
-
-	
-	
-	// Translate back
-	
-	translation_back_start := time.Now()
-	
-	for i := 0; i < len(a); i += 1 {
-		// Translate from fr.Element to G1ScalarField
-		a[i] = G1ScalarFieldtoFrElement(newscalars[i])
-	}
-	
-	translation_back_end := time.Since(translation_back_start)
-	
-
-	// switch decimation {
-	// case DIF:
-	// 	// Icicle NTT call
-	// 	call_icicle_ntt(newscalars, false, acquired_gpu)
-
-	// 	//difFFT(a, domain.Twiddles, 0, maxSplits, nil, opt.nbTasks)
-	// case DIT:
-	// 	ditFFT(a, domain.Twiddles, 0, maxSplits, nil, opt.nbTasks)
-	// default:
-	// 	panic("not implemented")
-	// }
-
-	elapsedIcicle := time.Since(start)
-
-
-	// Printing timing info
-
-	fmt.Fprintln(os.Stderr, "~~~ Timing info ~~~")
-
-	fmt.Fprintln(os.Stderr, "Time to translate:")
-	fmt.Fprintln(os.Stderr, translation_end)
-
-	fmt.Fprintln(os.Stderr, "Time to call icicle")
-	fmt.Fprintln(os.Stderr, icicle_end)
-
-	fmt.Fprintln(os.Stderr, "Time to translate back:")
-	fmt.Fprintln(os.Stderr, translation_back_end)
-
-	fmt.Fprintln(os.Stderr, "Total time elapsed:")
-	fmt.Fprintln(os.Stderr, elapsedIcicle)
-
-	fmt.Fprintln(os.Stderr, "\n\n ")
-
-	if PRINT_INFO {
-		fmt.Println("finish icicle fft", acquired_gpu, elapsedIcicle)
-		// fmt.Println("icicle gives", *p)
-	}
-	// var emptyAffine G1Affine;
-	// if *p == emptyAffine {
-	// 	fmt.Println("ICICLE RETURNED 0")
-	// 	log.Fatal("ICICLE RETURNED 0")
-	// }
-	
-
-	if SCHEDULE {
-		glob_mutex.Lock()
-		glob_busy[acquired_gpu] = false
-		glob_mutex.Unlock()
-		glob_sema.Release()
-	}
-
-}
-
-
-
-
 // parallelize threshold for a single butterfly op, if the fft stage is not parallelized already
 const butterflyThreshold = 16
 
 // FFT computes (recursively) the discrete Fourier transform of a and stores the result in a
 // if decimation == DIT (decimation in time), the input must be in bit-reversed order
 // if decimation == DIF (decimation in frequency), the output will be in bit-reversed order
-// func (domain *Domain) FFT(a []fr.Element, decimation Decimation, opts ...Option) {
+func (domain *Domain) FFT(a []fr.Element, decimation Decimation, opts ...Option) {
 
-// 	opt := options(opts...)
+	opt := options(opts...)
 
-// 	// if coset != 0, scale by coset table
-// 	if opt.coset {
-// 		if decimation == DIT {
-// 			// scale by coset table (in bit reversed order)
-// 			parallel.Execute(len(a), func(start, end int) {
-// 				n := uint64(len(a))
-// 				nn := uint64(64 - bits.TrailingZeros64(n))
-// 				for i := start; i < end; i++ {
-// 					irev := int(bits.Reverse64(uint64(i)) >> nn)
-// 					a[i].Mul(&a[i], &domain.CosetTable[irev])
-// 				}
-// 			}, opt.nbTasks)
-// 		} else {
-// 			parallel.Execute(len(a), func(start, end int) {
-// 				for i := start; i < end; i++ {
-// 					a[i].Mul(&a[i], &domain.CosetTable[i])
-// 				}
-// 			}, opt.nbTasks)
-// 		}
+	// if coset != 0, scale by coset table
+	if opt.coset {
+		if decimation == DIT {
+			// scale by coset table (in bit reversed order)
+			parallel.Execute(len(a), func(start, end int) {
+				n := uint64(len(a))
+				nn := uint64(64 - bits.TrailingZeros64(n))
+				for i := start; i < end; i++ {
+					irev := int(bits.Reverse64(uint64(i)) >> nn)
+					a[i].Mul(&a[i], &domain.CosetTable[irev])
+				}
+			}, opt.nbTasks)
+		} else {
+			parallel.Execute(len(a), func(start, end int) {
+				for i := start; i < end; i++ {
+					a[i].Mul(&a[i], &domain.CosetTable[i])
+				}
+			}, opt.nbTasks)
+		}
+	}
 
-// 	}
+	// find the stage where we should stop spawning go routines in our recursive calls
+	// (ie when we have as many go routines running as we have available CPUs)
+	maxSplits := bits.TrailingZeros64(ecc.NextPowerOfTwo(uint64(opt.nbTasks)))
+	if opt.nbTasks == 1 {
+		maxSplits = -1
+	}
 
-// 	// LOOK
-// 	// find the stage where we should stop spawning go routines in our recursive calls
-// 	// (ie when we have as many go routines running as we have available CPUs)
-// 	maxSplits := bits.TrailingZeros64(ecc.NextPowerOfTwo(uint64(opt.nbTasks)))
-// 	if opt.nbTasks == 1 {
-// 		maxSplits = -1
-// 	}
-
-// 	switch decimation {
-// 	case DIF:
-// 		difFFT(a, domain.Twiddles, 0, maxSplits, nil, opt.nbTasks)
-// 	case DIT:
-// 		ditFFT(a, domain.Twiddles, 0, maxSplits, nil, opt.nbTasks)
-// 	default:
-// 		panic("not implemented")
-// 	}
-// }
-
+	switch decimation {
+	case DIF:
+		difFFT(a, domain.Twiddles, 0, maxSplits, nil, opt.nbTasks)
+	case DIT:
+		ditFFT(a, domain.Twiddles, 0, maxSplits, nil, opt.nbTasks)
+	default:
+		panic("not implemented")
+	}
+}
 
 // FFTInverse computes (recursively) the inverse discrete Fourier transform of a and stores the result in a
 // if decimation == DIT (decimation in time), the input must be in bit-reversed order
@@ -369,69 +86,22 @@ const butterflyThreshold = 16
 // coset sets the shift of the fft (0 = no shift, standard fft)
 // len(a) must be a power of 2, and w must be a len(a)th root of unity in field F.
 func (domain *Domain) FFTInverse(a []fr.Element, decimation Decimation, opts ...Option) {
-
-	fmt.Fprintln(os.Stderr, "inverse fft call")
-
 	opt := options(opts...)
-
-	start := time.Now()
 
 	// find the stage where we should stop spawning go routines in our recursive calls
 	// (ie when we have as many go routines running as we have available CPUs)
-	// maxSplits := bits.TrailingZeros64(ecc.NextPowerOfTwo(uint64(opt.nbTasks)))
-	// if opt.nbTasks == 1 {
-	// 	maxSplits = -1
-	// }
-
-	// Translate scalars
-
-	var acquired_gpu = 12345
-	if SCHEDULE {
-		glob_sema.Acquire()
-		glob_mutex.Lock()
-		for i := 0; i < len(glob_busy); i++ {
-			if !glob_busy[i] {
-				glob_busy[i] = true
-				acquired_gpu = i
-				break;
-			}
-		}
-		glob_mutex.Unlock()
-	} else {
-		glob_mutex.Lock()
-		acquired_gpu = glob_use_gpu;
-		glob_use_gpu = (glob_use_gpu + 1) % NUM_GPUS;
-		glob_mutex.Unlock()
+	maxSplits := bits.TrailingZeros64(ecc.NextPowerOfTwo(uint64(opt.nbTasks)))
+	if opt.nbTasks == 1 {
+		maxSplits = -1
 	}
-
-	translation_start := time.Now()
-
-	g1scalars := make([]G1ScalarField, len(a))
-
-	// Translate from fr.Element to G1ScalarField
-	for i := 0; i < len(a); i += 1 {
-		g1scalars[i] = frElementToG1ScalarField(a[i])
+	switch decimation {
+	case DIF:
+		difFFT(a, domain.TwiddlesInv, 0, maxSplits, nil, opt.nbTasks)
+	case DIT:
+		ditFFT(a, domain.TwiddlesInv, 0, maxSplits, nil, opt.nbTasks)
+	default:
+		panic("not implemented")
 	}
-
-	translation_end := time.Since(translation_start)
-
-	icicle_start := time.Now()
-
-	call_icicle_ntt(g1scalars, true, acquired_gpu)
-	
-	icicle_end := time.Since(icicle_start)
-
-	translation_back_start := time.Now()
-
-	// Translate from G1ScalarField to fr.Element
-	for i := 0; i < len(a); i += 1 {
-		a[i] = G1ScalarFieldtoFrElement(g1scalars[i])
-	}
-
-	translation_back_end := time.Since(translation_back_start)
-
-
-
 
 	// scale by CardinalityInv
 	if !opt.coset {
@@ -440,97 +110,31 @@ func (domain *Domain) FFTInverse(a []fr.Element, decimation Decimation, opts ...
 				a[i].Mul(&a[i], &domain.CardinalityInv)
 			}
 		}, opt.nbTasks)
-	} else {
+		return
+	}
+
+	if decimation == DIT {
 		parallel.Execute(len(a), func(start, end int) {
 			for i := start; i < end; i++ {
 				a[i].Mul(&a[i], &domain.CosetTableInv[i]).
 					Mul(&a[i], &domain.CardinalityInv)
 			}
 		}, opt.nbTasks)
+		return
 	}
 
-	elapsedIcicle := time.Since(start)
-
-	fmt.Fprintln(os.Stderr, "~~~ Timing info ~~~")
-
-	fmt.Fprintln(os.Stderr, "Time to translate:")
-	fmt.Fprintln(os.Stderr, translation_end)
-
-	fmt.Fprintln(os.Stderr, "Time to call icicle")
-	fmt.Fprintln(os.Stderr, icicle_end)
-
-	fmt.Fprintln(os.Stderr, "Time to translate back:")
-	fmt.Fprintln(os.Stderr, translation_back_end)
-
-	fmt.Fprintln(os.Stderr, "Total time elapsed:")
-	fmt.Fprintln(os.Stderr, elapsedIcicle)
-
-	fmt.Fprintln(os.Stderr, "\n\n ")
-
-	// // decimation == DIF, need to access coset table in bit reversed order.
-	// parallel.Execute(len(a), func(start, end int) {
-	// 	n := uint64(len(a))
-	// 	nn := uint64(64 - bits.TrailingZeros64(n))
-	// 	for i := start; i < end; i++ {
-	// 		irev := int(bits.Reverse64(uint64(i)) >> nn)
-	// 		a[i].Mul(&a[i], &domain.CosetTableInv[irev]).
-	// 			Mul(&a[i], &domain.CardinalityInv)
-	// 	}
-	// }, opt.nbTasks)
+	// decimation == DIF, need to access coset table in bit reversed order.
+	parallel.Execute(len(a), func(start, end int) {
+		n := uint64(len(a))
+		nn := uint64(64 - bits.TrailingZeros64(n))
+		for i := start; i < end; i++ {
+			irev := int(bits.Reverse64(uint64(i)) >> nn)
+			a[i].Mul(&a[i], &domain.CosetTableInv[irev]).
+				Mul(&a[i], &domain.CardinalityInv)
+		}
+	}, opt.nbTasks)
 
 }
-
-// func (domain *Domain) FFTInverse(a []fr.Element, decimation Decimation, opts ...Option) {
-// 	opt := options(opts...)
-
-// 	// find the stage where we should stop spawning go routines in our recursive calls
-// 	// (ie when we have as many go routines running as we have available CPUs)
-// 	maxSplits := bits.TrailingZeros64(ecc.NextPowerOfTwo(uint64(opt.nbTasks)))
-// 	if opt.nbTasks == 1 {
-// 		maxSplits = -1
-// 	}
-// 	switch decimation {
-// 	case DIF:
-// 		// Swap for GPU fft
-// 		difFFT(a, domain.TwiddlesInv, 0, maxSplits, nil, opt.nbTasks)
-// 	case DIT:
-// 		ditFFT(a, domain.TwiddlesInv, 0, maxSplits, nil, opt.nbTasks)
-// 	default:
-// 		panic("not implemented")
-// 	}
-
-// 	// scale by CardinalityInv
-// 	if !opt.coset {
-// 		parallel.Execute(len(a), func(start, end int) {
-// 			for i := start; i < end; i++ {
-// 				a[i].Mul(&a[i], &domain.CardinalityInv)
-// 			}
-// 		}, opt.nbTasks)
-// 		return
-// 	}
-
-// 	if decimation == DIT {
-// 		parallel.Execute(len(a), func(start, end int) {
-// 			for i := start; i < end; i++ {
-// 				a[i].Mul(&a[i], &domain.CosetTableInv[i]).
-// 					Mul(&a[i], &domain.CardinalityInv)
-// 			}
-// 		}, opt.nbTasks)
-// 		return
-// 	}
-
-// 	// decimation == DIF, need to access coset table in bit reversed order.
-// 	parallel.Execute(len(a), func(start, end int) {
-// 		n := uint64(len(a))
-// 		nn := uint64(64 - bits.TrailingZeros64(n))
-// 		for i := start; i < end; i++ {
-// 			irev := int(bits.Reverse64(uint64(i)) >> nn)
-// 			a[i].Mul(&a[i], &domain.CosetTableInv[irev]).
-// 				Mul(&a[i], &domain.CardinalityInv)
-// 		}
-// 	}, opt.nbTasks)
-
-// }
 
 func difFFT(a []fr.Element, twiddles [][]fr.Element, stage, maxSplits int, chDone chan struct{}, nbTasks int) {
 	if chDone != nil {
