@@ -17,12 +17,23 @@
 package fft
 
 import (
+	"math/bits"
+	"reflect"
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark-crypto/internal/parallel"
-	"math/bits"
 
 	"github.com/consensys/gnark-crypto/ecc/bls12-377/fr"
+
+	"github.com/ingonyama-zk/icicle/wrappers/golang/core"
+	"github.com/ingonyama-zk/icicle/wrappers/golang/curves/bls12377"
 )
+
+/*
+#cgo LDFLAGS: -L${SRCDIR}/../../../../../icicle/icicle/build/lib -lingo_curve_bls12_377 -L${SRCDIR}/../../../../../icicle/icicle/build/lib -lingo_field_bls12_377 -lstdc++ -lm
+#include "icicle.h"
+*/
+
+import "C"
 
 // Decimation is used in the FFT call to select decimation in time or in frequency
 type Decimation uint8
@@ -35,6 +46,27 @@ const (
 // parallelize threshold for a single butterfly op, if the fft stage is not parallelized already
 const butterflyThreshold = 16
 
+// func TestNtt(t *testing.T) {
+// 	cfg := GetDefaultNttConfig()
+// 	scalars := GenerateScalars(1 << largestTestSize)
+
+// 	for _, size := range []int{4, largestTestSize} {
+// 		for _, v := range [4]core.Ordering{core.KNN, core.KNR, core.KRN, core.KRR} {
+// 			testSize := 1 << size
+
+// 			scalarsCopy := core.HostSliceFromElements[ScalarField](scalars[:testSize])
+// 			cfg.Ordering = v
+
+// 			// run ntt
+// 			output := make(core.HostSlice[ScalarField], testSize)
+// 			Ntt(scalarsCopy, core.KForward, &cfg, output)
+
+// 			// Compare with gnark-crypto
+// 			assert.True(t, testAgainstGnarkCryptoNtt(testSize, scalarsCopy, output, v, core.KForward))
+// 		}
+// 	}
+// }
+
 // FFT computes (recursively) the discrete Fourier transform of a and stores the result in a
 // if decimation == DIT (decimation in time), the input must be in bit-reversed order
 // if decimation == DIF (decimation in frequency), the output will be in bit-reversed order
@@ -42,7 +74,9 @@ func (domain *Domain) FFT(a []fr.Element, decimation Decimation, opts ...Option)
 
 	opt := options(opts...)
 
+	
 	// if coset != 0, scale by coset table
+	
 	if opt.coset {
 		if decimation == DIT {
 			// scale by coset table (in bit reversed order)
@@ -63,6 +97,14 @@ func (domain *Domain) FFT(a []fr.Element, decimation Decimation, opts ...Option)
 		}
 	}
 
+	cfg := bls12377.GetDefaultNttConfig()
+
+	// translate to icicle
+	scalarsIcicle := core.HostSliceFromElements(a)
+	
+	outputIcicle := core.HostSliceFromElements(a)
+
+
 	// find the stage where we should stop spawning go routines in our recursive calls
 	// (ie when we have as many go routines running as we have available CPUs)
 	maxSplits := bits.TrailingZeros64(ecc.NextPowerOfTwo(uint64(opt.nbTasks)))
@@ -72,12 +114,37 @@ func (domain *Domain) FFT(a []fr.Element, decimation Decimation, opts ...Option)
 
 	switch decimation {
 	case DIF:
-		difFFT(a, domain.Twiddles, 0, maxSplits, nil, opt.nbTasks)
+		// Input is bitreversed
+		// Sample icicle call: Ntt(scalarsCopy, core.KForward, &cfg, output)
+
+		cfg.Ordering = core.KNR
+		
+		bls12377.Ntt(scalarsIcicle, core.KForward, &cfg, outputIcicle)
+
+		difFFT(a, domain.Twiddles, 0, maxSplits, nil, opt.nbTasks) // old function call -- comment out once ntt swap is done
+
+
 	case DIT:
-		ditFFT(a, domain.Twiddles, 0, maxSplits, nil, opt.nbTasks)
+		// Output is bitreversed
+		cfg.Ordering = core.KRN
+		
+		bls12377.Ntt(scalarsIcicle, core.KForward, &cfg, outputIcicle)
+		ditFFT(a, domain.Twiddles, 0, maxSplits, nil, opt.nbTasks) // old function call -- comment out once ntt swap is done
+
+		
 	default:
 		panic("not implemented")
 	}
+	
+	// Check that the icicle NTT works as intended
+	// Comment out once this passes (when library issues are fixed)
+	if !reflect.DeepEqual(a, outputIcicle) {
+		panic("Output from forward fft differs between gnark-crypto and icicle")
+	}
+	
+	// Put results back in a
+	copy(a, outputIcicle)
+
 }
 
 // FFTInverse computes (recursively) the inverse discrete Fourier transform of a and stores the result in a
@@ -94,14 +161,44 @@ func (domain *Domain) FFTInverse(a []fr.Element, decimation Decimation, opts ...
 	if opt.nbTasks == 1 {
 		maxSplits = -1
 	}
+
+	cfg := bls12377.GetDefaultNttConfig()
+
+	scalarsIcicle := core.HostSliceFromElements(a)
+	
+	outputIcicle := core.HostSliceFromElements(a)
+
+
+
 	switch decimation {
 	case DIF:
-		difFFT(a, domain.TwiddlesInv, 0, maxSplits, nil, opt.nbTasks)
+		// Input is in bit-reversed order
+
+		cfg.Ordering = core.KNR
+
+		bls12377.Ntt(scalarsIcicle, core.KInverse, &cfg, outputIcicle)
+
+		difFFT(a, domain.TwiddlesInv, 0, maxSplits, nil, opt.nbTasks) // old function call -- remove when swap ntt with icicle
 	case DIT:
-		ditFFT(a, domain.TwiddlesInv, 0, maxSplits, nil, opt.nbTasks)
+		// Output is in bit-reversed order
+
+		cfg.Ordering = core.KRN
+
+		bls12377.Ntt(scalarsIcicle, core.KInverse, &cfg, outputIcicle)
+
+		ditFFT(a, domain.TwiddlesInv, 0, maxSplits, nil, opt.nbTasks) // old function call -- remove when swapped ntt with icicle
 	default:
 		panic("not implemented")
 	}
+
+	// Check that the NTT works as intended
+	// Comment out once this passes (when library issues are fixed)
+	if !reflect.DeepEqual(a, outputIcicle) {
+		panic("Output from inverse fft differs between gnark-crypto and icicle")
+	}
+
+	// Copy results back into a
+	copy(a, outputIcicle)
 
 	// scale by CardinalityInv
 	if !opt.coset {
